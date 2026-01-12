@@ -1,0 +1,7 @@
+spark:
+  app_name: "NewsIntelligencePipeline"
+  master: "local[*]"
+  log_level: "WARN"
+  packages:
+    - "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0"
+    - "org.apache.spark:spark-avro_2.12:3.5.0" # For schema handling if needed later
