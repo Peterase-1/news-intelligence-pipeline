@@ -20,10 +20,10 @@ minio==7.2.3
 boto3
 
 # NLP & AI
-transformers==4.36.2
-torch==2.1.2
-sentence-transformers==2.2.2
-nltk==3.8.1
+transformers
+torch
+sentence-transformers
+nltk
 
 # Vector Stores
 chromadb==0.4.22

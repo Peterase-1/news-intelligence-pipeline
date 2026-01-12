@@ -24,7 +24,11 @@ class NewsArticle(Base):
     
     # Processing Status
     is_processed = Column(Boolean, default=False)
-    sentiment_score = Column(Integer, nullable=True) # Placeholder for next layer
+    
+    # NLP Enrichment
+    sentiment_score = Column(Integer, nullable=True)     # e.g., 0-100 or raw score
+    sentiment_label = Column(String, nullable=True)      # e.g., "POSITIVE", "NEGATIVE"
+    embedding = Column(Text, nullable=True)              # Store vector as JSON string for now
     
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
