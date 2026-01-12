@@ -1,0 +1,10 @@
+kafka:
+  bootstrap_servers: "localhost:9092"
+  client_id: "news-intelligence-producer"
+  
+topics:
+  raw_news: "raw_news_topic"
+  processed_news: "processed_news_topic"
+
+schema_registry:
+  url: "http://localhost:8081" # Optional if we use Avro Registry later
