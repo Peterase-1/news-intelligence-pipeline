@@ -4,4 +4,7 @@ spark:
   log_level: "WARN"
   packages:
     - "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.0"
-    - "org.apache.spark:spark-avro_2.12:3.5.0" # For schema handling if needed later
+    - "org.apache.spark:spark-avro_2.12:3.5.0"
+    - "org.postgresql:postgresql:42.6.0"
+    - "org.apache.hadoop:hadoop-aws:3.3.4" # Matches Spark 3.5.0 Hadoop version
+    - "com.amazonaws:aws-java-sdk-bundle:1.12.262" # Required for hadoop-aws

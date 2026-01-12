@@ -2,16 +2,17 @@
 import sys
 import os
 import json
+import psycopg2
+from pyspark.sql.functions import from_json, col, current_timestamp, struct, to_json
+from pyspark.sql.types import StructType, StructField, StringType
 
 # Add project root to path
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../..')))
 
 from processing.spark.utils.spark_session import get_spark_session
 from processing.spark.jobs.clean_news import clean_text_udf
-from pyspark.sql.functions import from_json, col, current_timestamp, struct, to_json
-from pyspark.sql.types import StructType, StructField, StringType
 
-# Define Schema (must match ingestion/kafka_producer/schema.py)
+# Define Schema
 news_schema = StructType([
     StructField("url", StringType(), True),
     StructField("source", StringType(), True),
@@ -22,59 +23,135 @@ news_schema = StructType([
     StructField("scraped_at", StringType(), True)
 ])
 
+def configure_hadoop_s3(spark):
+    """Configures Spark to talk to MinIO (S3)"""
+    sc = spark.sparkContext
+    sc._jsc.hadoopConfiguration().set("fs.s3a.endpoint", "http://minio:9000")
+    sc._jsc.hadoopConfiguration().set("fs.s3a.access.key", "minio_user")
+    sc._jsc.hadoopConfiguration().set("fs.s3a.secret.key", "minio_password")
+    sc._jsc.hadoopConfiguration().set("fs.s3a.path.style.access", "true")
+    sc._jsc.hadoopConfiguration().set("fs.s3a.impl", "org.apache.hadoop.fs.s3a.S3AFileSystem")
+
+def write_to_postgres(rows):
+    """
+    Writes a list of Row objects to Postgres using psycopg2 with ON CONFLICT handling.
+    """
+    if not rows:
+        return
+
+    try:
+        # Connect to Postgres (Internal Docker Name)
+        conn = psycopg2.connect(
+            host="postgres",
+            port="5432",
+            database="news_db",
+            user="user",
+            password="password"
+        )
+        cur = conn.cursor()
+        
+        insert_query = """
+            INSERT INTO news_articles (url, source, title, author, published_at, scraped_at, body_text, updated_at, is_processed)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (url) DO NOTHING;
+        """
+        
+        data_tuples = [
+            (
+                r.url, 
+                r.source, 
+                r.title, 
+                r.author, 
+                r.published_at, 
+                r.scraped_at, 
+                r.body_text, 
+                r.updated_at,
+                True # is_processed
+            ) 
+            for r in rows
+        ]
+        
+        cur.executemany(insert_query, data_tuples)
+        conn.commit()
+        print(f"   ✅ Postgres: Inserted/Ignored {len(rows)} records.")
+        
+        cur.close()
+        conn.close()
+        
+    except Exception as e:
+        print(f"   ❌ CSV/DB Error: {e}")
+
+def process_batch(df, epoch_id):
+    """
+    Writes the batch to multiple sinks.
+    """
+    print(f"📦 Processing Batch {epoch_id} with {df.count()} records...")
+    
+    if df.count() == 0:
+        return
+
+    # --- 1. Write to Data Lake (MinIO) ---
+    try:
+        s3_path = "s3a://news-data-lake/silver/news_articles"
+        df.write \
+            .format("parquet") \
+            .mode("append") \
+            .save(s3_path)
+        print("   ✅ MinIO: Written Parquet.")
+    except Exception as e:
+        print(f"   ❌ MinIO Error: {e}")
+
+    # --- 2. Write to Database (Postgres) ---
+    try:
+        # Prepare data for Postgres (select columns)
+        postgres_df = df.select(
+            col("url"),
+            col("source"),
+            col("title"),
+            col("author"),
+            col("published_at").cast("timestamp"),
+            col("scraped_at").cast("timestamp"),
+            col("body_cleaned").alias("body_text"),
+            col("processed_at").alias("updated_at")
+        )
+        
+        # Collect to driver and insert via psycopg2
+        rows = postgres_df.collect()
+        write_to_postgres(rows)
+        
+    except Exception as e:
+        print(f"   ❌ Postgres Batch Error: {e}")
+
 def run_streaming_job():
     spark = get_spark_session("NewsProcessor")
-    spark.sparkContext.setLogLevel("ERROR")
+    spark.sparkContext.setLogLevel("WARN")
 
-    print("🚀 Starting Spark Streaming Job...")
+    configure_hadoop_s3(spark)
 
-    # 1. Read from Kafka
-    # Use KAFKA_BOOTSTRAP_SERVERS env var if set, otherwise default to "kafka:29092" (Docker network)
+    print("🚀 Starting Spark Storage Integration Job...")
+
     bootstrap_servers = os.environ.get("KAFKA_BOOTSTRAP_SERVERS", "kafka:29092")
     
-    kafka_options = {
-        "kafka.bootstrap.servers": bootstrap_servers,
-        "subscribe": "raw_news_topic",
-        "startingOffsets": "earliest" # Process missed data
-    }
-    
+    # 1. Read Stream
     df = spark.readStream \
         .format("kafka") \
-        .options(**kafka_options) \
+        .option("kafka.bootstrap.servers", bootstrap_servers) \
+        .option("subscribe", "raw_news_topic") \
+        .option("startingOffsets", "earliest") \
         .load()
 
-    # 2. Parse JSON
-    # Kafka value is binary, cast to string then parse
-    json_df = df.select(from_json(col("value").cast("string"), news_schema).alias("data")) \
-                .select("data.*")
-
-    # 3. Apply Cleaning
-    cleaned_df = json_df.withColumn("body_cleaned", clean_text_udf(col("body"))) \
-                        .withColumn("processed_at", current_timestamp()) \
-                        .drop("body") # Drop raw dirty body if desired
-                        
-    # 4. Write to Console (Verification)
-    query_console = cleaned_df.writeStream \
-        .outputMode("append") \
-        .format("console") \
-        .option("truncate", "false") \
-        .start()
-
-    # 5. Write back to Kafka (Topic: processed_news_topic)
-    # Prepare DataFrame for Kafka (key, value)
-    kafka_output_df = cleaned_df.select(
-        col("url").alias("key"),
-        to_json(struct("*")).alias("value")
-    )
+    # 2. Parse & Clean
+    json_df = df.select(from_json(col("value").cast("string"), news_schema).alias("data")).select("data.*")
     
-    query_kafka = kafka_output_df.writeStream \
-        .format("kafka") \
-        .option("kafka.bootstrap.servers", bootstrap_servers) \
-        .option("topic", "processed_news_topic") \
-        .option("checkpointLocation", "/tmp/spark_checkpoint_kafka") \
+    cleaned_df = json_df.withColumn("body_cleaned", clean_text_udf(col("body"))) \
+                        .withColumn("processed_at", current_timestamp())
+
+    # 3. Write Stream (ForeachBatch)
+    query = cleaned_df.writeStream \
+        .foreachBatch(process_batch) \
+        .option("checkpointLocation", "/tmp/checkpoint_storage_v2") \
         .start()
 
-    print("✅ Streaming queries started. Waiting for data...")
     spark.streams.awaitAnyTermination()
 
 if __name__ == "__main__":
