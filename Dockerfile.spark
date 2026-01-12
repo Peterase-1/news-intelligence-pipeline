@@ -1,0 +1,19 @@
+
+FROM apache/spark:3.5.0
+
+USER root
+
+# Install pip and system dependencies if needed (Bitnami images are minimal)
+# We might need gcc etc for some python packages, but for pure python ones usually fine.
+# Bitnami spark comes with python3.
+
+WORKDIR /app
+
+# Copy minimal requirements
+COPY requirements_spark.txt /app/requirements.txt
+
+# Install dependencies
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Reset to non-root user for security (good practice, though sometimes annoying for dev)
+USER 1001
