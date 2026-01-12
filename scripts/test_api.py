@@ -15,10 +15,15 @@ def test_api():
         response = requests.get(f"{BASE_URL}/news/")
         if response.status_code == 200:
             data = response.json()
-            count = data.get('count', len(data) if isinstance(data, list) else 0)
+            if isinstance(data, list):
+                 count = len(data)
+                 results = data
+            else:
+                 count = data.get('count', 0)
+                 results = data.get('results', [])
+            
             print(f"   ✅ Success! Found {count} articles.")
             # Print first one
-            results = data.get('results', data)
             if results:
                 print(f"      Sample: {results[0]['title'][:50]}... ({results[0]['sentiment_label']})")
         else:
